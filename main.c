@@ -17,7 +17,7 @@
 #define MINIMUM_BUFFER_SIZE 1024
 #define HASH_TABLE_SIZE 1031
 #define HASH_ERROR_CODE HASH_TABLE_SIZE + 1
-
+#define HASHING_PRIME_NUMBER 214463
 ////
 // MARK: - FUNCTION DECLARATION
 ////
@@ -53,6 +53,9 @@ void launch_find(NodePtr root, char *resource_name);
 void find(NodePtr node, ResultPtr results, char *resource_name, char *path);
 
 NodePtr global_tombstone;
+NodePtr global_shortcut;
+NodePtr global_root;
+char * global_last_path;
 
 ////
 // MARK: - STRUCT
@@ -73,9 +76,9 @@ struct result{
 };
 
 void free_node(NodePtr node){
-    free(node->name);
+    //free(node->name);
     free(node->data);
-    if (node->children != NULL) free(node->children);
+    //if (node->children != NULL) free(node->children);
     free(node);
 }
 
@@ -88,18 +91,17 @@ void delete_node(NodePtr father, unsigned int hash_key){
 ////
 // MARK: - HASH
 ////
-unsigned int /*fnv_hash*/DJBHash (void* key, unsigned long len){
-    unsigned char* p = key;
-    unsigned int h = 2166136261;
-    int i;
+unsigned int myhash (void* key, unsigned long len){
+    unsigned int hash = 0;
+    unsigned char* k_copy = key;
+    unsigned int i;
     
     for (i = 0; i < len; i++)
-        h = (h*16777619) ^ p[i];
-    
-    return h%HASH_TABLE_SIZE;
+        hash += k_copy[i] * HASHING_PRIME_NUMBER^i; //predispongo per fare diverse prove sulla bontà del numero primo scelto
+    return hash%HASH_TABLE_SIZE; //predispongo per fare il programma completamente scalibile in base alla dimensione della tabella di hash voluta
 }
 
-//funzione che gestisce le collisioni, documentata sul Cormen
+//funzione che gestisce le collisioni.
 unsigned int conflicts_handler(unsigned int conflicted_key, unsigned int counter){
     return (conflicted_key + counter*(1 + conflicted_key%(HASH_TABLE_SIZE-1)))%HASH_TABLE_SIZE;
 }
@@ -135,12 +137,14 @@ unsigned int last_symbol(char *string, char symbol){
 void clean_string(char * string){
     for(; *string; string++) *string = '\0';
 }
+unsigned long max(unsigned int len1, unsigned long len2){
+    if(len1 >len2 ) return len1;
+    return len2;
+}
 ////
 // MARK: - BINARY TREE FUNCTIONS (per la find)
 ////
-/* Implemento un albero binario per gestire i risultati della find.
- 
- L'implementazione delle funzioni di gestione dell'albero binario si rifà allo pseudocodice delle stesse funzioni, argomentato e discusso sul Cormen*/
+/* Implemento un albero binario per gestire i risultati della find e stamparli tramite una visita in-order*/
 void tree_insert(ResultPtr root, ResultPtr new_brother){
     ResultPtr y = NULL, x = root;
     while( x != NULL ){
@@ -163,17 +167,17 @@ ResultPtr tree_minimum(ResultPtr node){
     return node;
 }
 
-void transplant(ResultPtr root, ResultPtr u, ResultPtr v){
-    if(u->father == NULL) root = v;
-    else if (u == u->father->left_brother) u->father->left_brother = v;
-    else u->father->right_brother = v;
-    if(v != NULL) v->father = u->father;
+void transplant(ResultPtr root, ResultPtr first, ResultPtr second){
+    if(first->father == NULL) root = second;
+    else if (first == first->father->left_brother) first->father->left_brother = second;
+    else first->father->right_brother = second;
+    if(second != NULL) second->father = first->father;
 }
 
 void inorder_tree_walk( ResultPtr root){
     if(root != NULL){
         inorder_tree_walk(root->left_brother);
-        printf("ok %s\n", root->path);
+        printf("ok %s\n", root->path); //stampo su stdout il path trovato
         inorder_tree_walk(root->right_brother);
     }
 }
@@ -202,7 +206,7 @@ NodePtr solvePath(NodePtr root, char *path ){
             strcpy(tmp, path);
         path = path + index;
         
-        hash_key = DJBHash(tmp, strlen(tmp)); //calcolo la funzione di hash sul nome del percorso
+        hash_key = myhash(tmp, strlen(tmp)); //calcolo la funzione di hash sul nome del percorso
         hash_elected_node = root->children[hash_key]; //mi posiziono sull'elemento scelto
         
         //se sono arrivato all'ultimo nome oltre lo slash, vuol dire che sono riuscito a percorrere tutto il path in maniera corretta e che posso quindi ritorno il puntatore all'ultimo padre
@@ -251,7 +255,7 @@ unsigned int hashing_handler(NodePtr father, char *path){
     
     if (father == NULL) return HASH_ERROR_CODE;
     
-    hash_key = DJBHash(resource_name, strlen(resource_name)); //calcolo la funzione di hash sul nome del percorso
+    hash_key = myhash(resource_name, strlen(resource_name)); //calcolo la funzione di hash sul nome del percorso
     NodePtr hash_elected_node = father->children[hash_key]; //mi posiziono sull'elemento scelto
     
     //nel caso la risorsa non esiste
@@ -272,7 +276,11 @@ unsigned int hashing_handler(NodePtr father, char *path){
 }//fine della funzione
 
 void create(NodePtr root, char *path, char type){
-    NodePtr father = solvePath(root, path), hash_elected_node, new_node;
+    NodePtr father, hash_elected_node, new_node;
+    
+    if (root == global_root) father = solvePath(root, path);
+    else father = root;
+    
     unsigned int last_slash = last_symbol(path, '/'), hash_key;
     char resource_name[256];
     strcpy(resource_name, &path[last_slash+1]);
@@ -284,7 +292,7 @@ void create(NodePtr root, char *path, char type){
         return;
     }
     
-    hash_key = DJBHash(resource_name, strlen(resource_name)); //calcolo la funzione di hash sul nome del percorso
+    hash_key = myhash(resource_name, strlen(resource_name)); //calcolo la funzione di hash sul nome del percorso
     hash_elected_node = father->children[hash_key]; //mi posiziono sull'elemento scelto
     unsigned int alternative_key = hash_key, conflicts_counter = 0;
     
@@ -296,20 +304,31 @@ void create(NodePtr root, char *path, char type){
     }
     
     //inizializzo nuovo nodo da aggiungere nella struttura
-    new_node = calloc(1, sizeof(Node));
-    if (new_node == NULL){
-        printf("%s\n", "no");
-        return;
+    //nel caso che sia una dirctory. Alloco tutto lo spazio insieme per ridurre le chiamate a calloc che impattano in modo significativo il tempo di esecuzione.
+    if (type == 'd'){
+        NodePtr *hash;
+        new_node = (Node *)calloc(1, sizeof(Node) + (strlen(resource_name)+1)*sizeof(char) + HASH_TABLE_SIZE*sizeof(NodePtr));
+        new_node->name = (char*)(new_node +1);
+        hash = (NodePtr *)(new_node->name + (strlen(resource_name)+1));
+        new_node->children = hash;
     }
+    
+    else{
+        new_node = calloc(1, sizeof(Node) + (strlen(resource_name)+1)*sizeof(char));
+        //new_node = calloc(1, sizeof(Node));
+        if (new_node == NULL){
+            printf("%s\n", "no");
+            return;
+        }
+        new_node->name = (char*)(new_node +1);
+        //new_node->name = calloc(strlen(resource_name)+1, sizeof(char));
+    }
+    
     new_node->type = type;
-    new_node->name = calloc(strlen(resource_name)+1, sizeof(char));
-    if (new_node->name == NULL){
-        printf("%s\n", "no");
-        return;
-    }
     new_node->children_counter = 0;
     strcpy(new_node->name, resource_name);
-    if (type == 'd') new_node->children = calloc(HASH_TABLE_SIZE, sizeof(NodePtr));
+    
+    //if (type == 'd') new_node->children = calloc(HASH_TABLE_SIZE, sizeof(NodePtr));
     
     //nel caso in cui la funzione di hash punti ad una casella vuota o ad una tombstone, la riempio con il nuovo nodo
     if (hash_elected_node == NULL || hash_elected_node == global_tombstone){
@@ -335,6 +354,7 @@ void create(NodePtr root, char *path, char type){
         printf("%s\n", "ok");
     }
     father->children_counter++; //aumento il contatore dei figli del padre
+    if (type == 'd') global_shortcut = new_node;
 }
 
 void delete(NodePtr root, char *path){
@@ -430,6 +450,7 @@ void read_file(NodePtr root, char *path){
     //il campo data sia vuoto
     if( hash_elected_node->data == NULL) printf("contenuto \n");
     else printf("contenuto %s\n", hash_elected_node->data);
+    
 }//fine della funzione
 
 void target_recursive(NodePtr root ,char *path){
@@ -493,11 +514,13 @@ void find(NodePtr node, ResultPtr results, char *resource_name, char *path){
     unsigned long path_len = strlen(path);
     unsigned long resource_len = strlen(resource_name);
     unsigned long hash_elected_node_name_len = 0;
+    unsigned int counter = 0;
     
     //scorro tutte le caselle della hast_table
     for(unsigned int i = 0; i < HASH_TABLE_SIZE; i++){
         hash_elected_node = node->children[i];
-        if (hash_elected_node == NULL) continue; //nel caso sia vuota, salto alla successiva
+        if (counter >= node->children_counter) break; //controllo che non abbia già analizzato un numero di risorse pari a quelle totali del nodo
+        else if (hash_elected_node == NULL) continue; //nel caso sia vuota, salto alla successiva
         else if (hash_elected_node->type == 't') continue; //nel caso contenga una tombstone, è come se fosse vuota
         if (strcmp(hash_elected_node->name, resource_name) == 0){ //se il nome di una risorsa coincide con quello cercato, allora devo salvarlo nell'albero binario
             
@@ -524,7 +547,7 @@ void find(NodePtr node, ResultPtr results, char *resource_name, char *path){
                 new_result->path[strlen(new_result->path)] = '\0';
                 tree_insert(results, new_result);
             }
-            
+            counter++;
         } //fine dell'if
         
         //a prescendire dal fatto che mi sia salvato oppure no il percorso della risorsa, se incontro una nodo che è una cartella devo esplorare anche essa
@@ -539,6 +562,7 @@ void find(NodePtr node, ResultPtr results, char *resource_name, char *path){
             tmp[path_len + hash_elected_node_name_len + 2] = '\0';
             find(hash_elected_node, results, resource_name, tmp);
             free(tmp);
+            counter++;
         }//fine dell'if
     }//fine del for
 }//fine della funzione
@@ -573,7 +597,12 @@ int main(void){
     root->children = calloc(HASH_TABLE_SIZE, sizeof(NodePtr));
     strcpy(root->name, "root");
     root->data = NULL;
-
+    
+    global_last_path = calloc(256*10, sizeof(char));
+    global_root = root;
+    
+    unsigned int last_slash = 0;
+    
     while(1){
         
         while( c != '\n'){ //ciclo che viene ripetuto per ogni riga del file di input
@@ -603,47 +632,64 @@ int main(void){
         instruction = calloc( first_space_index + 1, sizeof(char)); //alloco memoria sufficiente per il nome dell'istruzione
         strncpy(instruction, buffer, first_space_index); // copio la porzione di stringa nello spazio allocato
         instruction[strlen(instruction)] = '\0';
-
+        
         unsigned int i = 1;
         second_space_index = find_symbol(&buffer[first_space_index+i], ' '); //trovo il secondo spazio
-
+        
         if (second_space_index == 0){
-        while ( *(&buffer[first_space_index+i]) == ' ') i++; //gestione del caso in cui l'input sia formato male
-        second_space_index = find_symbol(&buffer[first_space_index+i], ' '); //ignoro più spazi consecutivi tra i parametri
+            while ( *(&buffer[first_space_index+i]) == ' ') i++; //gestione del caso in cui l'input sia formato male
+            second_space_index = find_symbol(&buffer[first_space_index+i], ' '); //ignoro più spazi consecutivi tra i parametri
         }
         
         second_parameter = calloc(second_space_index+i, sizeof(char));//alloco la memoria sufficiente per il /
         strncpy(second_parameter, &buffer[first_space_index+i], second_space_index );
         second_parameter[strlen(second_parameter)] = '\0'; //aggiungo il terminatore
         
+        
         if( strcmp(instruction, "create") == 0){
+            global_shortcut = NULL;
             create(root, second_parameter,'f');
         }
         
         else if (strcmp(instruction, "create_dir") == 0){
-            create(root, second_parameter, 'd');
+            //ottimizzo per gestire esplosioni in verticale del file system
+            last_slash = last_symbol(second_parameter, '/');
+            if ( (global_shortcut != NULL)  && (strncmp(global_last_path, second_parameter, max(last_slash-1, strlen(global_last_path))) == 0)){
+                create(global_shortcut, &second_parameter[last_slash], 'd');
+            }
+            else create(root, second_parameter, 'd');
+            strcpy(global_last_path, second_parameter);
         }
         
-        else if (strcmp(instruction, "delete") == 0)
+        else if (strcmp(instruction, "delete") == 0){
+            global_shortcut = NULL;
             delete(root, second_parameter);
+        }
         
-        else if (strcmp(instruction, "delete_r") == 0)
+        else if (strcmp(instruction, "delete_r") == 0){
+            global_shortcut = NULL;
             target_recursive(root, second_parameter);
+        }
         
-        else if (strcmp(instruction, "find") == 0)
+        else if (strcmp(instruction, "find") == 0){
             launch_find(root, second_parameter);
+            global_shortcut = NULL;
+        }
         
-        else if (strcmp(instruction, "read") == 0)
+        else if (strcmp(instruction, "read") == 0){
+            global_shortcut = NULL;
             read_file(root,second_parameter);
+        }
         
         else if( strcmp(instruction, "write") == 0){
+            global_shortcut = NULL;
             third_parameter = calloc(strlen(&buffer[first_space_index+second_space_index+i+1]+1), sizeof(char)) ;
             third_parameter = strcpy(third_parameter, &buffer[first_space_index+second_space_index+i+2]);
             fix_symbol(third_parameter, '\"', '\0');
             write_file(root, second_parameter, third_parameter);
             free(third_parameter);
         }
-    
+        
         free(instruction);// libero memoria
         free(second_parameter);//libero memoria
         free(buffer); //libero memoria
